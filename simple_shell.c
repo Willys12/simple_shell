@@ -1,120 +1,192 @@
 #include "main.h"
-/* Working prototypes */
-void command_Execute(char *command);
-void reverse(char s[]);
-void itoa(int n, char s[]);
 
-/***/
-void itoa(int n, char s[])
+void interactive_mode(void);
+void batch_mode(FILE *file);
+int main(int argc, char **argv);
+
+/**
+* execute_command - excutes commands.
+* @command: Command being executed.
+* Return: Nothing
+*/
+void execute_command(char *command)
 {
-    int i, sign;
+pid_t pid, wpid;
+int status;
+char *args[3];
+char arg;
+int i = 0;
+int pipes[2];
+char *token;
+char *command_copy;
 
-    if ((sign = n) < 0)  /* record sign */
-        n = -n;          /* make n positive */
-    i = 0;
-    do {       /* generate digits in reverse order */
-        s[i++] = n % 10 + '0';   /* get next digit */
-    } while ((n /= 10) > 0);     /* delete it */
-    if (sign < 0)
-        s[i++] = '-';
-    s[i] = '\0';
-    reverse(s);
+pid = fork();
+
+if (pid == 0)
+{
+/* Child process */
+
+command_copy = strdup(command); /* Make a copy of the command for strtok */
+
+/* Use strtok to separate commands at pipes */
+token = strtok(command_copy, "|");
+
+pipe(pipes);
+while (token != NULL)
+{
+pid_t sub_pid = fork();
+
+if (sub_pid == 0)
+{
+/* Sub-process */
+
+dup2(pipes[1], STDOUT_FILENO);
+
+/* Close unused pipe ends */
+close(pipes[0]);
+close(pipes[1]);
+
+/* Split the command into the command name and its arguments */
+
+arg = strtok(token, " "); /* Split the command at spaces */
+while (arg != NULL)
+{
+args[i++] = arg;
+arg = strtok(NULL, " ");
+}
+args[i] = NULL; /* Null-terminate the array */
+
+/* Execute the command */
+execve(args[0], args, NULL);
+perror("hsh");
+_exit(EXIT_FAILURE);
+}
+else if (sub_pid > 0)
+{
+/* Wait for the sub-process to finish */
+waitpid(sub_pid, NULL, 0);
+
+/* Move to the next command in the pipeline */
+token = strtok(NULL, "|");
+}
+else
+{
+perror("hsh");
+_exit(EXIT_FAILURE);
+}
 }
 
-/* reverse:  reverse string s in place */
-void reverse(char s[])
-{
-    int i, j;
-    char c;
+/* Close the write end of the pipe in the parent */
+close(pipes[1]);
+/* Wait for all sub-processes to finish */
+while ((wpid = wait(&status)) > 0)
 
-    for (i = 0, j = strlen(s)-1; i<j; i++, j--) {
-        c = s[i];
-        s[i] = s[j];
-        s[j] = c;
-    }
+free(command_copy);
+
+_exit(EXIT_SUCCESS);
+}
+else if (pid < 0)
+{
+perror("hsh");
+}
+else
+{
+/* Parent process */
+do {
+wpid = waitpid(pid, &status, WUNTRACED);
+} while (!WIFEXITED(status) && !WIFSIGNALED(status));
+}
 }
 
-void command_Execute(char *command)
+/**
+* interactive_mode - checks for interactive mode.
+* Return: Nothing.
+*/
+void interactive_mode(void)
 {
-    pid_t pid;
-    int status;
+char *line = NULL;
+size_t len = 0;
 
-    pid = fork();
+while (1)
+{
+write(STDOUT_FILENO, "($) ", 4);
+if (getline(&line, &len, stdin) == -1)
+{
+/* End of file or error */
+break;
+}
 
-    if (pid == -1)
-    {
-        perror("fork");
-        _exit(EXIT_FAILURE);
-    }
-    else if (pid == 0)
-    {
-        /* Child process */
+/* Remove newline character */
+line[strcspn(line, "\n")] = '\0';
 
-        /* Execute the command */
-        if (execlp(command, command, (char *)NULL) == -1)
-        {
-            perror(command);
-            _exit(EXIT_FAILURE);
-        }
-    }
-    else
-    {
-        /* Parent process */
+if (strcmp(line, "exit") == 0)
+{
+break;
+}
 
-        /* Wait for the child process to finish */
-        waitpid(pid, &status, 0);
+execute_command(line);
+}
 
-        if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
-        {
-            char exit_status[4];
-            itoa(WEXITSTATUS(status), exit_status);
-            write(STDERR_FILENO, "Error: Command failed with exit status ", 40);
-            write(STDERR_FILENO, exit_status, strlen(exit_status));
-            write(STDERR_FILENO, "\n", 1);
-        }
-    }
+free(line);
+}
+
+/**
+* batch_mode - Executes a series of commands from a file in batch mode.
+* @file: The file containing the commands to be executed.
+* Return: Nothing.
+*/
+void batch_mode(FILE *file)
+{
+char *line = NULL;
+size_t len = 0;
+
+while (getline(&line, &len, file) != -1)
+{
+/* Remove newline character */
+line[strcspn(line, "\n")] = '\0';
+
+execute_command(line);
+}
+
+free(line);
 }
 
 /**
 * main - Entry point.
-* Return: 0 on success.
+* @argc: Number of commandline arguments.
+* @argv: commandline argument vectors.
+* Return: On success 0
 */
-int main(void)
+int main(int argc, char **argv)
 {
-    char *command = NULL;
-    size_t command_len = 0; /* Initialize to zero */
-    ssize_t read;
-	size_t len;
+int fd;
 
-    while (1)
-    {
-        /* Shell prompt */
-        write(STDOUT_FILENO, "$ ", 2);
+if (argc == 1)
+{
+/* Interactive mode */
+interactive_mode();
+}
+else if (argc == 2)
+{
+/* Batch mode */
+fd = open(argv[1], O_RDONLY);
+if (fd == -1)
+{
+perror("hsh");
+_exit(EXIT_FAILURE);
+}
 
-        /* Checking inputs */
-        read = getline(&command, &command_len, stdin);
+dup2(fd, STDIN_FILENO);
+close(fd);
 
-        if (read == -1)
-        {
-            /* Shell exit on EOF (Ctrl+D) */
-            write(STDOUT_FILENO, "\nExiting shell...\n", 18);
-            break;
-        }
+batch_mode(stdin);
+}
+else
+{
+write(STDERR_FILENO, "Usage: hsh [batch_file]\n", 24);
+_exit(EXIT_FAILURE);
+}
 
-        /* Remove newline character if present */
-        len = strlen(command);
-        if (len > 0 && command[len - 1] == '\n')
-        {
-            command[len - 1] = '\0';
-        }
-
-        /* Execution is here */
-        command_Execute(command);
-    }
-
-    /* After the loop, free the dynamically allocated memory */
-    free(command);
-
-    return 0;
+return (0);
 }
 
